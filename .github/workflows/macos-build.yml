@@ -11,6 +11,7 @@ on:
       - issue178_build-test-failures
       - issue-2-cicd-logging
       - macOS-testRelease
+      - feature/macos-bundle-deps
 
 jobs:
   build-macos:
@@ -48,7 +49,7 @@ jobs:
       - name: Remove obsolete typing package
         run: pip uninstall -y typing || echo "typing not installed"
 
-      # ✅ NEW: build-time NLTK download
+      # Build-time NLTK download (packages used by grammar.py / GUI.py)
       - name: Download NLTK corpora for bundling
         run: |
           mkdir -p nltk_data
@@ -56,13 +57,44 @@ jobs:
           import nltk, os
           download_dir = "nltk_data"
           os.makedirs(download_dir, exist_ok=True)
-          # the ones that kept failing on client mac
-          nltk.download("wordnet", download_dir=download_dir)
-          nltk.download("omw-1.4", download_dir=download_dir)
-          # these two names fix your developer's odd names
-          nltk.download("punkt", download_dir=download_dir)
-          nltk.download("averaged_perceptron_tagger", download_dir=download_dir)
+          packages = [
+              "wordnet",
+              "wordnet_ic",
+              "omw-1.4",
+              "punkt",
+              "punkt_tab",
+              "averaged_perceptron_tagger",
+              "averaged_perceptron_tagger_eng",
+          ]
+          for package in packages:
+              nltk.download(package, download_dir=download_dir)
           PYCODE
+
+      # Bundle a portable JDK so Grammar Check works with no system Java
+      - name: Download Temurin JDK 17 (macOS)
+        run: |
+          set -euo pipefail
+          ARCH="$(uname -m)"
+          if [ "$ARCH" = "arm64" ]; then
+            JDK_URL="https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.12%2B7/OpenJDK17U-jdk_aarch64_mac_hotspot_17.0.12_7.tar.gz"
+          else
+            JDK_URL="https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.12%2B7/OpenJDK17U-jdk_x64_mac_hotspot_17.0.12_7.tar.gz"
+          fi
+          echo "Downloading Temurin JDK for $ARCH from $JDK_URL"
+          curl -L "$JDK_URL" -o temurin17.tar.gz
+          mkdir -p jdk_extract
+          tar -xzf temurin17.tar.gz -C jdk_extract
+          # Normalize to jre/bin/java (macOS layout is Contents/Home)
+          HOME_DIR="$(find jdk_extract -type d -path '*/Contents/Home' | head -n 1)"
+          if [ -z "$HOME_DIR" ]; then
+            echo "Could not locate JDK Contents/Home after extract"
+            find jdk_extract -maxdepth 4 -type d
+            exit 1
+          fi
+          rm -rf jre
+          mv "$HOME_DIR" jre
+          chmod +x jre/bin/java
+          ./jre/bin/java -version
 
       - name: Build macOS App
         run: |
@@ -74,6 +106,7 @@ jobs:
           --add-data "build_assets/en-model.slp:pattern/text/en" \
           --add-data "CTkXYFrame:CTkXYFrame" \
           --add-data "nltk_data:nltk_data" \
+          --add-data "jre:jre" \
           --collect-data whisper \
           --collect-data lightning_fabric \
           --collect-data pytorch_lightning \

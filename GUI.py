@@ -27,17 +27,9 @@ nltk.download = lambda *args, **kwargs: None
 from components.constants import DEFAULT_FONT_SIZE, LARGE_FONT_SIZE, BUTTON_FONT_SIZE, LABEL_FONT_SIZE 
 
 # Ensure NLTK knows where to find the bundled data when running as a frozen app
-app_dir = os.path.dirname(os.path.abspath(__file__))
-nltk_data_dir = os.path.join(app_dir, "nltk_data")
+from java_runtime import get_base_path
+nltk_data_dir = os.path.join(get_base_path(), "nltk_data")
 if os.path.exists(nltk_data_dir):
-    # put it first, not last
-    nltk.data.path.insert(0, nltk_data_dir)
-
-# Ensure NLTK knows where to find the bundled data when running as a frozen app
-app_dir = os.path.dirname(os.path.abspath(__file__))
-nltk_data_dir = os.path.join(app_dir, "nltk_data")
-if os.path.exists(nltk_data_dir):
-    # put it first, not last
     nltk.data.path.insert(0, nltk_data_dir)
 else:
     logging.warning("GUI.py: bundled nltk_data not found")

@@ -7,10 +7,10 @@ nltk.download('wordnet')
 nltk.download('wordnet_ic')
 
 import addConventions
+from java_runtime import get_base_path
 
-# #looking into the bundled nltk_data first (frozen app)
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
-BUNDLED_NLTK = os.path.join(APP_DIR, "nltk_data")
+# Prefer bundled nltk_data (PyInstaller _MEIPASS or source tree)
+BUNDLED_NLTK = os.path.join(get_base_path(), "nltk_data")
 if os.path.exists(BUNDLED_NLTK):
     nltk.data.path.insert(0, BUNDLED_NLTK)
 
