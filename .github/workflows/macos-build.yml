@@ -109,6 +109,8 @@ jobs:
           --add-data "CTkXYFrame:CTkXYFrame" \
           --add-data "nltk_data:nltk_data" \
           --add-data "jre:jre" \
+          --collect-data language_tool_python \
+          --copy-metadata language_tool_python \
           --collect-data whisper \
           --collect-data lightning_fabric \
           --collect-data pytorch_lightning \

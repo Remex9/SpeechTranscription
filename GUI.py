@@ -3,36 +3,42 @@ warnings.filterwarnings("ignore", module="matplotlib")  # suppress font warnings
 
 import logging
 logging.getLogger("language_tool_python").setLevel(logging.ERROR)  # suppress LanguageTool INFO
-# Adding Logging - CICD Internal Dev 
-import logging
-import os
-import sys
-import nltk
-nltk.download('punkt_tab')
-nltk.download('averaged_perceptron_tagger_eng')
-nltk.download('wordnet')
-nltk.download('wordnet_ic')
+# Adding Logging - CICD Internal Dev
 import os
 import sys
 from tkinter import Text
-import nltk # type: ignore
 import platform
 import subprocess
-import logging
+
+import nltk  # type: ignore
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-nltk.download = lambda *args, **kwargs: None
-
-from components.constants import DEFAULT_FONT_SIZE, LARGE_FONT_SIZE, BUTTON_FONT_SIZE, LABEL_FONT_SIZE 
-
-# Ensure NLTK knows where to find the bundled data when running as a frozen app
 from java_runtime import get_base_path
+
+# Frozen apps must use bundled nltk_data and never download at startup.
 nltk_data_dir = os.path.join(get_base_path(), "nltk_data")
 if os.path.exists(nltk_data_dir):
     nltk.data.path.insert(0, nltk_data_dir)
 else:
     logging.warning("GUI.py: bundled nltk_data not found")
+
+if getattr(sys, "frozen", False):
+    nltk.download = lambda *args, **kwargs: None
+else:
+    for _pkg in (
+        "punkt_tab",
+        "averaged_perceptron_tagger_eng",
+        "wordnet",
+        "wordnet_ic",
+    ):
+        try:
+            nltk.download(_pkg, quiet=True)
+        except Exception as exc:  # noqa: BLE001
+            logging.warning("GUI.py: nltk.download(%s) failed: %s", _pkg, exc)
+
+from components.constants import DEFAULT_FONT_SIZE, LARGE_FONT_SIZE, BUTTON_FONT_SIZE, LABEL_FONT_SIZE
 
 # main.py
 from customtkinter import *
