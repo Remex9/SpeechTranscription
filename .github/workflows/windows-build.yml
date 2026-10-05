@@ -15,6 +15,7 @@ on:
       - excellenceGUI
       - nltkDownloads
       - feature/remove-java-prerequisite_windows
+      - feature/macos-bundle-deps
 
 jobs:
   build-windows:
@@ -43,7 +44,10 @@ jobs:
           pip install -r requirements.txt importlib-metadata sacremoses tokenizers
           pip install pipwin mysql-connector-python
           pipwin install pyaudio
-          python -m nltk.downloader punkt averaged_perceptron_tagger stopwords vader_lexicon
+
+      # The packaged app never downloads NLTK data, so it must be bundled
+      - name: Download NLTK data for bundling
+        run: python scripts/bundle_nltk_data.py nltk_data
 
       - name: Initialize Git submodules
         run: git submodule update --init --recursive
@@ -70,6 +74,7 @@ jobs:
           --add-data "images;images" ^
           --add-data "build_assets\\en-model.slp;pattern/text/en" ^
           --add-data "CTkXYFrame;CTkXYFrame" ^
+          --add-data "nltk_data;nltk_data" ^
           --add-data "jre;jre" ^
           --collect-data language_tool_python ^
           --copy-metadata language_tool_python ^
