@@ -4,14 +4,22 @@ import multiprocessing
 # processes re-launch this executable and would otherwise start a second GUI.
 multiprocessing.freeze_support()
 
+import os
+import sys
+
+# CI smoke test of the packaged app: runs before the GUI imports so a broken
+# import is reported instead of crashing (which hangs CI on an error dialog).
+if os.environ.get("HEADLESS", "false").lower() == "true":
+    from selftest import run_selftest
+
+    sys.exit(run_selftest())
+
 import warnings
 warnings.filterwarnings("ignore", module="matplotlib")  # suppress font warnings
 
 import logging
 logging.getLogger("language_tool_python").setLevel(logging.ERROR)  # suppress LanguageTool INFO
 # Adding Logging - CICD Internal Dev
-import os
-import sys
 from tkinter import Text
 import platform
 import subprocess
@@ -354,23 +362,9 @@ class mainGUI(CTk):
                                             height=30, width=120, lock=True)
         self.showGraphButton.place(relx=0, rely=1, anchor=SW, x=110, y=-10)  # Position to the right of the Help button
         
-        promptRestart = False
         if promptRestart:
             self.restartPromptPopup()
         self.mainloop()
 
 if __name__ == "__main__":
-    try:
-        headless = os.environ.get("HEADLESS", "false").lower() == "true"
-        if headless:
-            logger.info("Running in headless mode. GUI launch skipped.")
-            # Optionally test imports or basic initialization
-            import torch, whisper
-            logger.info("Core modules loaded successfully in headless mode.")
-            sys.exit(0)
-        else:
-            # Launch the GUI normally
-            gui = mainGUI()  # __init__ already calls mainloop()
-    except Exception as e:
-        # logger.exception("An error occurred while running the GUI.")
-        raise
+    gui = mainGUI()  # __init__ already calls mainloop()

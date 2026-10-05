@@ -12,32 +12,8 @@ import sys
 
 import nltk
 
-PACKAGES = [
-    "punkt",  # grammar.py checks tokenizers/punkt and falls back to naive splitting without it
-    "punkt_tab",
-    "averaged_perceptron_tagger_eng",
-    "wordnet",
-    "omw-1.4",
-    "wordnet_ic",
-]
-
-
-def download(target_dir):
-    for package in PACKAGES:
-        print(f"Downloading {package}")
-        nltk.download(package, download_dir=target_dir, quiet=True, raise_on_error=True)
-
-
-def verify(target_dir):
-    nltk.data.path[:] = [target_dir]
-
-    from nltk import pos_tag, sent_tokenize, word_tokenize
-    from nltk.stem import WordNetLemmatizer
-
-    nltk.data.find("tokenizers/punkt")
-    assert sent_tokenize("The dog runs. The cat sleeps.") == ["The dog runs.", "The cat sleeps."]
-    assert pos_tag(word_tokenize("The dog runs"))[1] == ("dog", "NN")
-    assert WordNetLemmatizer().lemmatize("dogs") == "dog"
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import nltk_resources  # noqa: E402
 
 
 def main():
@@ -48,8 +24,11 @@ def main():
     os.makedirs(target_dir, mode=0o755, exist_ok=True)
     os.chmod(target_dir, 0o755)
 
-    download(target_dir)
-    verify(target_dir)
+    for package in nltk_resources.PACKAGES:
+        print(f"Downloading {package}")
+        nltk.download(package, download_dir=target_dir, quiet=True, raise_on_error=True)
+
+    nltk_resources.verify(target_dir)
     print(f"NLTK data verified in {target_dir}")
 
 

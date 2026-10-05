@@ -16,6 +16,10 @@ on:
       - nltkDownloads
       - feature/remove-java-prerequisite_windows
       - feature/macos-bundle-deps
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
 
 jobs:
   build-windows:
@@ -101,11 +105,36 @@ jobs:
           --hidden-import "pyannote.audio" ^
           GUI.py
 
+      # Launch the packaged exe in self-test mode without the runner's Java, so
+      # it can only pass using what is bundled inside it. The exe is windowed
+      # (no console), so results come back through the report file.
+      - name: Smoke test packaged app
+        shell: pwsh
+        timeout-minutes: 15
+        env:
+          HEADLESS: "true"
+          SALTIFY_SELFTEST_REPORT: ${{ github.workspace }}\selftest-report.txt
+        run: |
+          $report = $env:SALTIFY_SELFTEST_REPORT
+          Remove-Item $report -ErrorAction SilentlyContinue
+          Remove-Item Env:JAVA_HOME -ErrorAction SilentlyContinue
+          $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -notmatch '(?i)java|jdk|jre' }) -join ';'
+          $p = Start-Process -FilePath "dist\Saltify.exe" -Wait -PassThru
+          if (-not (Test-Path $report)) {
+            "RESULT: FAIL (app exited with $($p.ExitCode) before writing a report)" | Set-Content $report
+          }
+          Add-Content $env:GITHUB_STEP_SUMMARY "### Windows packaged app self-test (exit code $($p.ExitCode))"
+          Add-Content $env:GITHUB_STEP_SUMMARY '```'
+          Get-Content $report | Add-Content $env:GITHUB_STEP_SUMMARY
+          Add-Content $env:GITHUB_STEP_SUMMARY '```'
+          Get-Content $report
+          exit $p.ExitCode
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: SpeechTranscription_windows_logs
-          path: app.log
+          name: SpeechTranscription_windows_selftest
+          path: selftest-report.txt
 
       - uses: actions/upload-artifact@v4
         if: always()

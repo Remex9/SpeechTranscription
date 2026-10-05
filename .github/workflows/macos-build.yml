@@ -12,6 +12,10 @@ on:
       - issue-2-cicd-logging
       - macOS-testRelease
       - feature/macos-bundle-deps
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
 
 jobs:
   build-macos:
@@ -80,16 +84,29 @@ jobs:
           chmod +x jre/bin/java
           ./jre/bin/java -version
 
-      # Static ffmpeg/ffprobe (Homebrew's are dynamically linked and not portable)
+      # Static ffmpeg/ffprobe (Homebrew's are dynamically linked and not portable).
+      # Pinned to one release and checksummed so builds are reproducible; to upgrade,
+      # change FFMPEG_RELEASE and both hashes together.
       - name: Download static ffmpeg (macOS)
+        env:
+          FFMPEG_RELEASE: 1789931890_9.0.2
+          FFMPEG_SHA256: c8ed4c4e6978a03c485edbfe4e0a5dc2380f8a30bba5150531b31b094492d924
+          FFPROBE_SHA256: fcbe839537485eaee7a7a8bc5cbc0f90d53617e80943e8a5b2e31cb851197ea6
         run: |
           set -euo pipefail
-          if [ "$(uname -m)" = "arm64" ]; then ARCH=arm64; else ARCH=amd64; fi
-          BASE="https://ffmpeg.martin-riedl.de/redirect/latest/macos/$ARCH/release"
+          if [ "$(uname -m)" != "arm64" ]; then
+            echo "Pinned ffmpeg build is arm64-only; runner is $(uname -m)"
+            exit 1
+          fi
+          BASE="https://ffmpeg.martin-riedl.de/download/macos/arm64/$FFMPEG_RELEASE"
           rm -rf ffmpeg_bin ffmpeg_extract
           mkdir -p ffmpeg_bin ffmpeg_extract
+          printf '%s  ffmpeg.zip\n%s  ffprobe.zip\n' "$FFMPEG_SHA256" "$FFPROBE_SHA256" > ffmpeg.sha256
           for tool in ffmpeg ffprobe; do
             curl -fL "$BASE/$tool.zip" -o "$tool.zip"
+          done
+          shasum -a 256 -c ffmpeg.sha256
+          for tool in ffmpeg ffprobe; do
             unzip -o "$tool.zip" -d ffmpeg_extract
             BIN="$(find ffmpeg_extract -type f -name "$tool" | head -n 1)"
             if [ -z "$BIN" ]; then
@@ -142,16 +159,33 @@ jobs:
           --hidden-import "pyannote.audio" \
           GUI.py
 
-      - name: Run GUI headless for log
+      # Launch the packaged app in self-test mode with a minimal PATH and no
+      # JAVA_HOME, so it can only pass using what is bundled inside it.
+      - name: Smoke test packaged app
+        timeout-minutes: 15
         run: |
-          export HEADLESS=true
-          python GUI.py > app.log 2>&1 || true
+          REPORT="$PWD/selftest-report.txt"
+          rm -f "$REPORT"
+          set +e
+          env -u JAVA_HOME PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+            HEADLESS=true SALTIFY_SELFTEST_REPORT="$REPORT" ./dist/Saltify
+          STATUS=$?
+          set -e
+          [ -f "$REPORT" ] || echo "RESULT: FAIL (app exited with $STATUS before writing a report)" > "$REPORT"
+          {
+            echo "### macOS packaged app self-test (exit code $STATUS)"
+            echo '```'
+            cat "$REPORT"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat "$REPORT"
+          exit $STATUS
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: SpeechTranscription_macos_logs
-          path: app.log
+          name: SpeechTranscription_macos_selftest
+          path: selftest-report.txt
 
       - uses: actions/upload-artifact@v4
         if: always()
