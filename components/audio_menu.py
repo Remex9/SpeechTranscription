@@ -296,8 +296,11 @@ class audioMenu(CTkFrame):
         self._pollId = None
         self._lockedForProcessing = []
         self._grammarRun = None
-        # Normalizing rewrites the audio file, so a cancelled run must finish before a retry starts one
-        self._normalizeLock = threading.Lock()
+        self._grammarContinuation = False
+        # Normalizing can't be interrupted and rewrites the audio file, so a cancel waits for it
+        self._prepareThread = None
+        self._cancelling = False
+        self._lockedForPreparation = []
 
     @global_error_handler
     def uploadAudio(self):
@@ -658,6 +661,8 @@ class audioMenu(CTkFrame):
             self.applyAliasesButton, self.downloadAudioButton, self.exportButton, self.grammarButton,
             self.morphemesButton, self.submitGrammarButton, self.transcriptionBoxClearButton,
             self.conventionBoxClearButton) if widget is not cancelButton]
+        if kind == "grammar":
+            widgets.append(self.correctionEntryBox)
         self._lockedForProcessing = [(widget, widget.cget("state")) for widget in widgets]
         for widget in widgets:
             lockItem(widget)
@@ -668,9 +673,13 @@ class audioMenu(CTkFrame):
         """Puts every control back the way it was before the work started."""
         cancelButton, label = self._processingButton(self.processing)
         cancelButton.configure(text=label)
+        unlockItem(cancelButton)
         self.processing = None
         self._processingMessages = None
         self._transcriptionJob = None
+        self._prepareThread = None
+        self._cancelling = False
+        self._releasePreparationLocks()
         if self._pollId is not None:
             self.after_cancel(self._pollId)
             self._pollId = None
@@ -694,6 +703,13 @@ class audioMenu(CTkFrame):
                 self._failProcessing(f"Something went wrong while processing: {error}", traceback.format_exc())
 
     def _applyProcessingMessages(self):
+        if self._cancelling:
+            # Waiting for audio preparation to end before giving the controls back
+            if self._prepareThread is None or not self._prepareThread.is_alive():
+                self._finishCancel()
+            else:
+                self._pollId = self.after(100, self._pollProcessing)
+            return
         messages = []
         try:
             while True:
@@ -709,6 +725,7 @@ class audioMenu(CTkFrame):
         for message in messages:
             kind = message[0]
             if kind == "prepared":
+                self._releasePreparationLocks()
                 self._startTranscriptionJob(message[1])
             elif kind == "progress":
                 stage, fraction = message[1], message[2]
@@ -724,20 +741,51 @@ class audioMenu(CTkFrame):
     @global_error_handler
     def cancelProcessing(self):
         """Stops whatever is running. The audio and transcript are left as they were."""
-        if self.processing is None:
+        if self.processing is None or self._cancelling:
             return
-        kind = self.processing
         self._processingCancel.set()
         if self._transcriptionJob is not None:
             self._transcriptionJob.cancel()
+        if self._prepareThread is not None and self._prepareThread.is_alive():
+            # Normalization is still rewriting the audio file and can't be interrupted. Keep every
+            # control locked until it ends so nothing can load or play audio underneath it.
+            self._cancelling = True
+            cancelButton, _ = self._processingButton(self.processing)
+            cancelButton.configure(text="Cancelling...")
+            lockItem(cancelButton)
+            self.progressLabel.configure(text="Cancelling... finishing audio preparation")
+            return
+        self._finishCancel()
+
+    def _finishCancel(self):
+        kind = self.processing
+        continuation = self._grammarContinuation
         self._endProcessing()
+        if kind == "grammar" and continuation:
+            self._resetGrammarStep()
         self.stopProgressBar("Transcription cancelled" if kind == "transcription" else "Grammar check cancelled",
                              completed=False)
 
+    def _lockForPreparation(self):
+        """Playback reads the audio file that normalization replaces, so pause access to it."""
+        widgets = (self.restartButton, self.backwardButton, self.playPauseButton, self.forwardButton,
+                   self.timelineSlider)
+        self._lockedForPreparation = [(widget, widget.cget("state")) for widget in widgets]
+        for widget in widgets:
+            lockItem(widget)
+
+    def _releasePreparationLocks(self):
+        for widget, state in self._lockedForPreparation:
+            widget.configure(state=state)
+        self._lockedForPreparation = []
+
     def _failProcessing(self, message, details):
         kind = self.processing
+        continuation = self._grammarContinuation
         print(details)
         self._endProcessing()
+        if kind == "grammar" and continuation:
+            self._resetGrammarStep()
         self.stopProgressBar("Transcription failed" if kind == "transcription" else "Grammar check failed",
                              completed=False)
         retry = self.startTranscription if kind == "transcription" else self.grammarCheckThread
@@ -979,16 +1027,16 @@ class audioMenu(CTkFrame):
             self.playPauseButton.configure(image=self._play_icon)
 
         self._beginProcessing("transcription", "Preparing audio...")
-        threading.Thread(target=self._prepareAudio,
-                         args=(self._processingMessages, self._processingCancel), daemon=True).start()
+        self._lockForPreparation()
+        self._prepareThread = threading.Thread(target=self._prepareAudio,
+                                               args=(self._processingMessages, self._processingCancel),
+                                               daemon=True)
+        self._prepareThread.start()
 
     def _prepareAudio(self, messages, cancel):
         # Runs off the GUI thread; only talks to the GUI through the message queue
         try:
-            with self._normalizeLock:
-                if cancel.is_set():
-                    return
-                filename = self.audio.normalizeUploadedFile()
+            filename = self.audio.normalizeUploadedFile()
             if not os.path.exists(filename) or os.path.getsize(filename) == 0:
                 raise FileNotFoundError(filename)
             if not cancel.is_set():
@@ -1055,7 +1103,8 @@ class audioMenu(CTkFrame):
     def _runGrammarCheck(self, checker, text, messages, cancel):
         # Runs off the GUI thread: only computes, the GUI is updated in _onGrammarCheckDone
         try:
-            checker.checkGrammar(text, False)
+            if text is not None:
+                checker.checkGrammar(text, False)
             correction = checker.getNextCorrection(shouldStop=cancel.is_set)
             if not cancel.is_set():
                 messages.put(("done", (checker, correction)))
@@ -1063,6 +1112,15 @@ class audioMenu(CTkFrame):
             if not cancel.is_set():
                 messages.put(("error", f"The grammar check failed: {error}. Your transcript has not been changed; "
                                        "you can retry.", traceback.format_exc()))
+
+    def _startGrammarRun(self, checker, text, status):
+        """text is the transcript for a new check, or None to continue to the next correction."""
+        self._grammarRun = checker
+        self._grammarContinuation = text is None
+        self._beginProcessing("grammar", status)
+        threading.Thread(target=self._runGrammarCheck,
+                         args=(checker, text, self._processingMessages, self._processingCancel),
+                         daemon=True).start()
 
     @global_error_handler
     def toggleGrammarCheck(self):
@@ -1076,40 +1134,44 @@ class audioMenu(CTkFrame):
     def grammarCheckThread(self):
         if self.processing is not None:
             return  # already running; ignore repeated clicks
-        text = self.getTranscriptionText()
         # A fresh checker per run, so a cancelled run still finishing can't touch the next one
-        self._grammarRun = GrammarChecker()
-        self._beginProcessing("grammar", "Checking grammar...")
-        threading.Thread(target=self._runGrammarCheck,
-                         args=(self._grammarRun, text, self._processingMessages, self._processingCancel),
-                         daemon=True).start()
+        self._startGrammarRun(GrammarChecker(), self.getTranscriptionText(), "Checking grammar...")
 
     def _onGrammarCheckDone(self, result):
         checker, correction = result
-        self.grammar = checker
-        lockItem(self.exportButton)
-        unlockItem(self.conventionBox)
-        unlockItem(self.correctionEntryBox)
-        unlockItem(self.submitGrammarButton)
-        self.conventionBox.delete("1.0", "end")
-        self.correctionEntryBox.delete("1.0", "end")
+        if not self._grammarContinuation:
+            self.grammar = checker
+            lockItem(self.exportButton)
+            unlockItem(self.conventionBox)
+            unlockItem(self.correctionEntryBox)
+            unlockItem(self.submitGrammarButton)
+            self.conventionBox.delete("1.0", "end")
+            self.correctionEntryBox.delete("1.0", "end")
+            self.color_code_transcription()
         self._showGrammarCorrection(*correction)
-        self.color_code_transcription()
-        self.stopProgressBar("Grammar check complete")
+        self.stopProgressBar("Grammar check complete" if correction[1] is None else "Next correction ready")
+
+    def _resetGrammarStep(self):
+        """After a cancelled or failed search for the next correction, end the grammar step.
+        Running Grammar Check again starts over."""
+        self.correctionEntryBox.delete("1.0", "end")
+        lockItem(self.correctionEntryBox)
+        lockItem(self.submitGrammarButton)
+        unlockItem(self.exportButton)
+        self.grammarCheckPerformed = False
 
     @global_error_handler
     def applyCorrection(self):
+        if self.processing is not None:
+            return
         unlockItem(self.conventionBox)
         correctedSentence = format_correction_for_convention_box(
             self.correctionEntryBox.get("1.0", "end")
         )
         self.conventionBox.insert("end", correctedSentence)
         self.correctionEntryBox.delete("1.0", "end")
-        self.manageGrammarCorrection()
-
-    @global_error_handler
-    def manageGrammarCorrection(self):
-        self._showGrammarCorrection(*self.grammar.getNextCorrection())
+        # Finding the next correction can check many sentences, so do it off the GUI thread
+        self._startGrammarRun(self.grammar, None, "Finding next correction...")
 
     def _showGrammarCorrection(self, corrected, sentenceToCorrect):
         if corrected:

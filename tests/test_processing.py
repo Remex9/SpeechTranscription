@@ -394,3 +394,129 @@ def test_real_whisper_transcription_in_worker_process(tmp_path):
     assert any(message[1] == "Transcribing" and message[2] > 0.1 for message in messages if message[0] == "progress")
     assert messages[-1][0] == "done"
     assert "dog" in messages[-1][1].lower()
+
+
+class TestReviewFixes:
+    """Cancelling during audio preparation, and finding later grammar corrections in the background."""
+
+    @staticmethod
+    def _enablePlayback(menu):
+        for widget in (menu.restartButton, menu.backwardButton, menu.playPauseButton, menu.forwardButton,
+                       menu.timelineSlider):
+            widget.configure(state="normal")
+
+    def test_cancel_during_preparation_keeps_controls_locked_until_it_finishes(self, menu):
+        self._enablePlayback(menu)
+        release = threading.Event()
+        started = threading.Event()
+        path = menu.audio.filePath
+
+        def slowNormalize():
+            started.set()
+            release.wait(10)
+            return path
+        menu.audio.normalizeUploadedFile = slowNormalize
+
+        menu.toggleTranscription()
+        assert started.wait(5)
+        assert menu.playPauseButton.cget("state") == "disabled"
+        menu.toggleTranscription()  # Cancel
+
+        # Still preparing: nothing is handed back yet
+        _pump(menu, lambda: False, timeout=0.3)
+        assert menu.processing == "transcription"
+        assert menu.transcribeButton.cget("text") == "Cancelling..."
+        assert menu.transcribeButton.cget("state") == "disabled"
+        assert menu.uploadButton.cget("state") == "disabled"
+        assert menu.playPauseButton.cget("state") == "disabled"
+        menu.toggleTranscription()  # ignored while cancelling
+        menu.startTranscription()
+        assert menu.processing == "transcription"
+
+        release.set()
+        assert _pump(menu, lambda: menu.processing is None)
+        assert menu.transcribeButton.cget("text") == "Transcribe"
+        assert menu.transcribeButton.cget("state") == "normal"
+        assert menu.uploadButton.cget("state") == "normal"
+        assert menu.playPauseButton.cget("state") == "normal"
+        assert menu.timelineSlider.cget("state") == "normal"
+        assert menu.progressLabel.cget("text") == "Transcription cancelled"
+        assert FakeJob.instances == []  # the prepared audio was never transcribed
+        assert _transcript(menu) == "[0:00] Existing transcript."
+
+    def test_playback_unlocks_once_audio_is_prepared(self, menu):
+        self._enablePlayback(menu)
+        FakeJob.script = []  # transcription keeps running
+        menu.toggleTranscription()
+        assert _pump(menu, lambda: FakeJob.instances)
+        assert menu.playPauseButton.cget("state") == "normal"
+        assert menu.uploadButton.cget("state") == "disabled"
+
+    def test_cancel_after_preparation_is_immediate(self, menu):
+        FakeJob.script = []
+        menu.toggleTranscription()
+        assert _pump(menu, lambda: FakeJob.instances)
+        menu.toggleTranscription()
+        assert menu.processing is None
+        assert FakeJob.instances[0].cancelled
+
+    @pytest.fixture
+    def grammarMenu(self, menu, monkeypatch):
+        """Grammar check on a transcript whose first sentence needs a correction and the rest don't.
+        Checking the later sentences waits on menu.release and records which thread did the work."""
+        menu.release = threading.Event()
+        menu.checkThreads = []
+
+        def correctSentence(sentence):
+            if "goed" in sentence:
+                return sentence.replace("goed", "went")
+            menu.checkThreads.append(threading.current_thread())
+            menu.release.wait(10)
+            return sentence
+        monkeypatch.setattr(grammar_module.addConventions, "correctSentence", correctSentence)
+        menu.transcriptionBox.delete("1.0", "end")
+        menu.transcriptionBox.insert("1.0", "[0:00] She goed home. [0:02] It is fine. [0:04] All good.")
+        menu.toggleGrammarCheck()
+        assert _pump(menu, lambda: menu.processing is None)
+        assert "went" in menu.correctionEntryBox.get("1.0", "end")
+        assert menu.submitGrammarButton.cget("state") == "normal"
+        return menu
+
+    def test_submit_finds_the_next_correction_off_the_gui_thread(self, grammarMenu):
+        menu = grammarMenu
+        started = time.perf_counter()
+        menu.applyCorrection()
+        assert time.perf_counter() - started < 1  # returned without checking the remaining sentences
+        assert menu.processing == "grammar"
+        assert menu.grammarButton.cget("text") == "Cancel"
+        assert menu.submitGrammarButton.cget("state") == "disabled"
+        assert menu.correctionEntryBox.cget("state") == "disabled"
+
+        menu.release.set()
+        assert _pump(menu, lambda: menu.processing is None)
+        assert menu.checkThreads and threading.main_thread() not in menu.checkThreads
+        assert menu.grammarCheckPerformed
+        assert menu.progressLabel.cget("text") == "Grammar check complete"
+        assert menu.exportButton.cget("state") == "normal"
+        assert menu.morphemesButton.cget("state") == "normal"
+        assert menu.submitGrammarButton.cget("state") == "disabled"
+        convention = menu.conventionBox.get("1.0", "end")
+        assert "It is fine." in convention and "All good." in convention
+
+    def test_cancelling_the_next_correction_ends_the_grammar_step(self, grammarMenu):
+        menu = grammarMenu
+        menu.applyCorrection()
+        assert _pump(menu, lambda: menu.checkThreads)
+        menu.toggleGrammarCheck()  # Cancel
+        menu.release.set()
+
+        assert menu.processing is None
+        assert menu.grammarButton.cget("text") == "Grammar Check"
+        assert menu.grammarButton.cget("state") == "normal"
+        assert menu.submitGrammarButton.cget("state") == "disabled"
+        assert menu.correctionEntryBox.cget("state") == "disabled"
+        assert menu.exportButton.cget("state") == "normal"
+        assert not menu.grammarCheckPerformed
+        assert menu.progressLabel.cget("text") == "Grammar check cancelled"
+        _pump(menu, lambda: False, timeout=0.3)
+        assert menu.popups == []
